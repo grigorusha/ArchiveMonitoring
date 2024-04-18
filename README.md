@@ -23,13 +23,13 @@
 5. Настроить файл config.ini
 
 # Настройки config.ini
-BackupFolder = "D:\YandexDisk\Save" - локальная папка с архивами
-RemoteFolder = "GoogleDrv:Save" - папка в облаке, запись в формате RClone
-MinEmptySpaceInGB = 50 - минимальное место на локальном диске и в облаке
-ReviewPeriodInDay = 10 - есть ли арзивы в течение хаданного периода
-TelegramBotUsers = "MyName,0123456789" - нужно записать имя пользователя телеграм и его ИД
-TelegramBot = "MyBotName" - имя бота в Телеграм
-TelegramBotToken = "" - тут укажите данные токена от вашего бота
+1. BackupFolder = "D:\YandexDisk\Save" - локальная папка с архивами
+2. RemoteFolder = "GoogleDrv:Save" - папка в облаке, запись в формате RClone
+3. MinEmptySpaceInGB = 50 - минимальное место на локальном диске и в облаке
+4. ReviewPeriodInDay = 10 - есть ли арзивы в течение хаданного периода
+5. TelegramBotUsers = "MyName,0123456789" - нужно записать имя пользователя телеграм и его ИД
+6. TelegramBot = "MyBotName" - имя бота в Телеграм
+7. TelegramBotToken = "" - тут укажите данные токена от вашего бота
 
 # Получение данных от Телеграм для настройки
 1. создание и настройка Бота делается в корневом боте Телегам - https://t.me/BotFather
