@@ -2,6 +2,7 @@ import sys, os, time
 import shutil, subprocess, psutil, requests
 
 firma_name, telegram_bot, telegram_bot_token, telegram_bot_users = "", "", "", []
+APP_UPDATER = "ArchiveMonitoringUpdater.exe"
 
 def check_and_kill_process(process_name):
     for proc in psutil.process_iter(['pid', 'name']):
@@ -128,9 +129,12 @@ def main():
         shutil.move(new_file, original_file)
         print("Updater: Обновление успешно выполнено.")
 
-        # Запускаем новую версию приложения
-        print(f"Updater: Запуск новой версии {original_file}")
-        subprocess.Popen([original_file], creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+        # сначала надо проверить среду исполнения: если отладка (python.exe), то пропускаем, если автономное приложение, то старт
+        current_app_path = sys.executable  # Путь к текущему исполняемому файлу (.exe)
+        if current_app_path.lower()==APP_UPDATER.lower():
+            # Запускаем новую версию приложения
+            print(f"Updater: Запуск новой версии {original_file}")
+            subprocess.Popen([original_file], creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
 
     except Exception as e:
         print(f"Updater: Критическая ошибка в скрипте обновления: {e}")
