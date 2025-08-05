@@ -8,12 +8,31 @@ def check_and_kill_process(process_name):
     for proc in psutil.process_iter(['pid', 'name']):
         if proc.info['name'].lower() == process_name.lower():
             print(f"Процесс {process_name} (PID: {proc.info['pid']}) найден, завершаю...")
-            proc.kill()
-            time.sleep(3)
-            print(f"Процесс {process_name} завершен.")
-            return True
+            fl_kill = False
+            for _ in range(5):
+                if not proc.is_running():
+                    fl_kill = True
+                    break
+                try:
+                    proc.terminate()  # Пробуем мягкое завершение
+                    proc.wait(timeout=3)
+                    proc.kill()
+                    time.sleep(3)
+                    print(f"Процесс {process_name} завершен.")
+                    fl_kill = True
+                    break
+                except:
+                    time.sleep(3)
+            if not fl_kill:
+                print(f"Процесс {process_name} не удалось звершить.")
+            return fl_kill
     print(f"Процесс {process_name} не найден.")
     return False
+
+def run_as_exe_app(APP_FILENAME):
+    # проверим среду исполнения: если отладка (python.exe), то ложь, если автономное приложение, то истина
+    current_app_path = sys.executable  # Путь к текущему исполняемому файлу (.exe)
+    return os.path.basename(current_app_path).lower()==APP_FILENAME.lower()
 
 def read_config():
     global firma_name, telegram_bot, telegram_bot_token, telegram_bot_users
@@ -89,10 +108,15 @@ def send_message_to_telegram_bot(firma_name, telegram_bot, telegram_bot_token, t
 
 def main():
     global firma_name, telegram_bot, telegram_bot_token, telegram_bot_users
+    if len(sys.argv)<4:
+        print("Запуск только в режиме Обновления...")
+        return
+
     read_config()
 
     original_file = sys.argv[1]
     new_file = sys.argv[2]
+    start_after_update_flag = sys.argv[3]
 
     print(f"Updater: Замена {original_file} на {new_file}")
 
@@ -130,31 +154,27 @@ def main():
         print("Updater: Обновление успешно выполнено.")
 
         # сначала надо проверить среду исполнения: если отладка (python.exe), то пропускаем, если автономное приложение, то старт
-        current_app_path = sys.executable  # Путь к текущему исполняемому файлу (.exe)
-        if current_app_path.lower()==APP_UPDATER.lower():
+        if run_as_exe_app(APP_UPDATER) and start_after_update_flag.lower()=="yes":
             # Запускаем новую версию приложения
             print(f"Updater: Запуск новой версии {original_file}")
-            subprocess.Popen([original_file], creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+            subprocess.Popen([original_file], creationflags=0)
 
     except Exception as e:
         print(f"Updater: Критическая ошибка в скрипте обновления: {e}")
         # input("нажмите энтер")
         send_message_to_telegram_bot(firma_name, telegram_bot, telegram_bot_token, telegram_bot_users, "Ошибка в скрипте обновления.")
+
+        print("\nПауза 10 сек...")
+        time.sleep(10)
         sys.exit(1)
     finally:
         pass
-        # # Удаляем временный скрипт обновления
-        # updater_script_path = sys.argv[0]  # Путь к этому скрипту
-        # print("Updater: Удаление временного скрипта обновления.")
-        # try:
-        #     # Добавляем небольшую задержку перед удалением самого себя
-        #     time.sleep(1)
-        #     os.remove(updater_script_path)
-        # except OSError as e:
-        #     print(f"Updater: Ошибка удаления скрипта обновления {updater_script_path}: {e}")
 
     print("Updater: Скрипт обновления завершен.")
     send_message_to_telegram_bot(firma_name, telegram_bot, telegram_bot_token, telegram_bot_users, "Обновление успешно выполнено.")
+
+    print("\nПауза 10 сек...")
+    time.sleep(10)
     sys.exit(0) # Скрипт завершился успешно
 
 main()
