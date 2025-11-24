@@ -4,30 +4,81 @@ import shutil, subprocess, psutil, requests
 firma_name, telegram_bot, telegram_bot_token, telegram_bot_users = "", "", "", []
 APP_UPDATER = "ArchiveMonitoringUpdater.exe"
 
-def check_and_kill_process(process_name):
-    for proc in psutil.process_iter(['pid', 'name']):
-        if proc.info['name'].lower() == process_name.lower():
-            print(f"Процесс {process_name} (PID: {proc.info['pid']}) найден, завершаю...")
-            fl_kill = False
-            for _ in range(5):
-                if not proc.is_running():
-                    fl_kill = True
-                    break
+def check_and_kill_process(process_name, timeout=20):
+    """Убивает процесс по имени с заданным таймаутом."""
+    killed = found = False
+    for proc in psutil.process_iter(['pid', 'name', 'exe', 'cmdline']):
+        try:
+            # Более надежная проверка имени процесса
+            proc_name = proc.info.get('name') or ''
+            if proc_name.lower() != process_name.lower():
+                continue
+
+            if not proc.is_running():
+                print(f"Найден процесс {process_name}, завершен...")
+                return True
+
+            found = True
+            pid = proc.info['pid']
+            print(f"Найден процесс {process_name} (PID: {pid}), завершаю...")
+
+            # Сначала пробуем корректно завершить
+            proc.terminate()
+
+            # Ждем завершения с таймаутом
+            try:
+                proc.wait(timeout=timeout / 2)
+                killed = True
+                print(f"Процесс {process_name} корректно завершен.")
+                break
+            except psutil.TimeoutExpired:
                 try:
-                    proc.terminate()  # Пробуем мягкое завершение
-                    proc.wait(timeout=3)
                     proc.kill()
-                    time.sleep(3)
-                    print(f"Процесс {process_name} завершен.")
-                    fl_kill = True
+
+                    # Даем немного времени для завершения
+                    proc.wait(timeout=timeout / 2)
+                    killed = True
+                    print(f"Процесс {process_name} принудительно завершен.")
                     break
-                except:
-                    time.sleep(3)
-            if not fl_kill:
-                print(f"Процесс {process_name} не удалось звершить.")
-            return fl_kill
-    print(f"Процесс {process_name} не найден.")
-    return False
+                except Exception as kill_err:
+                    print(f"Ошибка принудительного завершения: {kill_err}")
+                    continue
+
+        except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+            print(f"Ошибка доступа к процессу: {e}")
+            continue
+
+    if not found:
+        print(f"Процесс {process_name} не найден.")
+        return False
+
+    return killed
+
+# def check_and_kill_process(process_name, timeout=20):
+#     for proc in psutil.process_iter(['pid', 'name']):
+#         if proc.info['name'].lower() == process_name.lower():
+#             print(f"Процесс {process_name} (PID: {proc.info['pid']}) найден, завершаю...")
+#             fl_kill = False
+#             for _ in range(5):
+#                 if not proc.is_running():
+#                     fl_kill = True
+#                     break
+#                 try:
+#                     proc.terminate()  # Пробуем мягкое завершение
+#                     proc.wait(timeout=timeout / 2)
+#                     proc.kill()
+#                     time.sleep(3)
+#                     print(f"Процесс {process_name} завершен.")
+#                     fl_kill = True
+#                     break
+#                 except:
+#                     time.sleep(3)
+#             if not fl_kill:
+#                 print(f"Процесс {process_name} не удалось завершить.")
+#             return fl_kill
+#     print(f"Процесс {process_name} не найден.")
+#     return False
+
 
 def run_as_exe_app(APP_FILENAME):
     # проверим среду исполнения: если отладка (python.exe), то ложь, если автономное приложение, то истина
