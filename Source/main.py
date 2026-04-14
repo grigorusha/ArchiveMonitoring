@@ -1,28 +1,59 @@
-import os, time, datetime, random, sys, filecmp
+import os, time, datetime, random, sys, filecmp, json, signal
 import pathlib, tempfile, shutil, subprocess, psutil, requests, threading, pystray
 from ping3 import ping
 from PIL import Image, ImageDraw
-from packaging.version import parse as parse_version # Для надежного сравнения версий
+from packaging.version import parse as parse_version  # Для надежного сравнения версий
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-from rclone_python import rclone,utils
+from rclone_python import rclone, utils
+from max_api_client_python import API
 
-VERSION = __version__ = "1.5.4"
+VERSION = __version__ = "1.5.5"
 GITHUB_OWNER, GITHUB_REPO = "grigorusha", "ArchiveMonitoring"
 APP_FILENAME, ZIP_FILENAME, APP_UPDATER = "ArchiveMonitoring.exe", "ArchiveMonitoring.zip", "ArchiveMonitoringUpdater.exe"
 fl_update = True
 
 archivator_app = "7z.exe"
-archive_types = ["zip","7z","rar"]
+archive_types = ["zip", "7z", "rar"]
 min_file_size = 1000
+process = None
 
 message_info = ""
 app_running = new_day = True
 tray_icon = pict_icon = None
 CHECK_INTERVAL = 10  # Интервал проверки в секундах
 
-firma_name, backup_folder, rclone_config, remote_folder, telegram_bot, telegram_bot_token, telegram_bot_users, telegram_bot_users_work = "", "", "", "", "", "", [], []
+firma_name, backup_folder, rclone_config, remote_folder = "", "", "", ""
+telegram_bot, telegram_bot_token, telegram_bot_users, telegram_bot_users_work = "", "", [], []
+max_client_instance, max_client_token, max_client_users = "", "", ""
+
 min_empty_space, review_period, depth_folder, time_start = 10, 5, 3, ""
 net_server, net_folder, net_folder_user, net_folder_pass = "", "", "", ""
+
+
+# Регистрируем обработчик сигнала (ctrl+C)
+def signal_handler(sig, frame):
+    """Обработчик сигнала Ctrl+C"""
+    print("\nПолучен сигнал прерывания (Ctrl+C)...")
+
+    if process and process.poll() is None:
+        # Пытаемся корректно завершить процесс
+        try:
+            process.terminate()  # Посылаем SIGTERM
+            print("Ожидание graceful shutdown (2 секунды)...")
+            time.sleep(2)
+            if process.poll() is None:  # Если все еще работает
+                process.kill()  # Принудительно завершаем
+                print("Процесс принудительно завершен")
+        except Exception as e:
+            print(f"Ошибка при завершении процесса: {e}")
+
+    os._exit(0)
+    # sys.exit(0)
+    raise SystemExit()
+
+
+original_sigint = signal.signal(signal.SIGINT, signal_handler)
+
 
 def init_config():
     conf = """
@@ -33,12 +64,15 @@ def init_config():
     """.strip('\n')
 
     return conf
+
+
 def close_spalsh_screen():
     try:  # pyinstaller spalsh screen
         import pyi_splash
         pyi_splash.close()
     except:
         pass
+
 
 def make_icon():
     global pict_icon
@@ -47,14 +81,16 @@ def make_icon():
         # Создаем иконки заранее
         pict_icon = create_icon(icon_file)
     else:
-        pict_icon = create_icon_ini( (0,200,0) )
+        pict_icon = create_icon_ini((0, 200, 0))
+
 
 def is_number(s):
     try:
-        float(s) # for int, long and float
+        float(s)  # for int, long and float
     except:
         return False
     return True
+
 
 def typeof(your_var):
     if (isinstance(your_var, bool)):
@@ -71,6 +107,7 @@ def typeof(your_var):
         return 'str'
     else:
         return "type is unknown"
+
 
 def check_and_kill_process(process_name, timeout=20):
     """Убивает процесс по имени с заданным таймаутом."""
@@ -130,6 +167,7 @@ def create_icon(photo_path):
     image.thumbnail((48, 48))  # Уменьшаем изображение для начального отображения
     return image
 
+
 def create_icon_ini(color):
     """Создает иконку с кружком указанного цвета"""
     image = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
@@ -137,16 +175,21 @@ def create_icon_ini(color):
     dc.ellipse((5, 5, 60, 60), fill=color)
     return image
 
-def read_config():
-    global firma_name, backup_folder, rclone_config, remote_folder, net_server, net_folder, net_folder_user, net_folder_pass, min_empty_space, review_period, depth_folder, telegram_bot, telegram_bot_token, telegram_bot_users, time_start, fl_update
 
-    firma_name, backup_folder, rclone_config, remote_folder, telegram_bot, telegram_bot_token, telegram_bot_users = "", "", "", "", "", "", []
+def read_config():
+    global firma_name, backup_folder, rclone_config, remote_folder, net_server, net_folder, net_folder_user, net_folder_pass, min_empty_space, review_period, depth_folder, telegram_bot, telegram_bot_token, telegram_bot_users, max_client_instance, max_client_token, max_client_users, time_start, fl_update
+
+    firma_name, backup_folder, rclone_config, remote_folder = "", "", "", ""
+    telegram_bot, telegram_bot_token, telegram_bot_users = "", "", []
+    max_client_instance, max_client_token, max_client_users = "", "", ""
+
     min_empty_space, review_period, depth_folder, time_start = 10, 5, 3, ""
-    net_server, net_folder, net_folder_user,net_folder_pass = "", "", "", ""
+    net_server, net_folder, net_folder_user, net_folder_pass = "", "", "", ""
     fl_update = True
 
-    dir = os.path.dirname(os.path.abspath(sys.executable)) if run_as_exe_app(APP_FILENAME) else os.path.dirname(__file__)
-    filename = os.path.join(dir,"config.ini")
+    dir = os.path.dirname(os.path.abspath(sys.executable)) if run_as_exe_app(APP_FILENAME) else os.path.dirname(
+        __file__)
+    filename = os.path.join(dir, "config.ini")
     if os.path.isfile(filename):
         with open(filename, mode='r') as f:
             lines = f.readlines()
@@ -178,6 +221,7 @@ def read_config():
         command = command.lower()
         if command == "FirmaName".lower():
             firma_name = params.replace('"', '')
+
         elif command == "BackupFolder".lower():
             backup_folder = params.replace('"', '')
             backup_folder = backup_folder.replace('/', '\\')
@@ -187,6 +231,7 @@ def read_config():
             rclone_config = rclone_config.replace('/', '\\')
         elif command == "RemoteFolder".lower():
             remote_folder = params.replace('"', '')
+
         elif command == "NetServer".lower():
             net_server = params.replace('"', '')
         elif command == "NetFolder".lower():
@@ -195,6 +240,7 @@ def read_config():
             net_folder_user = params.replace('"', '')
         elif command == "NetFolderPass".lower():
             net_folder_pass = params.replace('"', '')
+
         elif command == "TelegramBot".lower():
             telegram_bot = params.replace('"', '')
         elif command == "TelegramBotToken".lower():
@@ -205,21 +251,36 @@ def read_config():
             telegram_bot_users = []
             for b_user in bot_users:
                 user_list = b_user.split(",")
-                if len(user_list)<2: continue
-                telegram_bot_users.append( [user_list[0],user_list[1]] )
+                if len(user_list) < 2: continue
+                telegram_bot_users.append([user_list[0], user_list[1]])
+
+        elif command == "MaxClientInstance".lower():
+            max_client_instance = params.replace('"', '')
+        elif command == "MaxClientToken".lower():
+            max_client_token = params.replace('"', '')
+        elif command == "MaxClientUsers".lower():
+            max_client_users = params.replace('"', '')
+            bot_users = max_client_users.split(";")
+            max_client_users = []
+            for b_user in bot_users:
+                user_list = b_user.split(",")
+                if len(user_list) < 2: continue
+                max_client_users.append([user_list[0], user_list[1]])
+
         elif command == "MinEmptySpaceInGB".lower():
             min_empty_space = int(params)
         elif command == "ReviewPeriodInDay".lower():
             review_period = int(params)
         elif command == "DepthFolderFind".lower():
             depth_folder = int(params)
+
         elif command == "Time".lower():
             time_start = str(params)
         elif command == "Update".lower():
             update_str = str(params).lower()
-            if update_str=="1" or update_str=="yes":
+            if update_str == "1" or update_str == "yes":
                 fl_update = True
-            elif update_str=="0" or update_str=="no":
+            elif update_str == "0" or update_str == "no":
                 fl_update = False
 
     return
@@ -231,8 +292,8 @@ def get_latest_release_info(owner, repo, zip_filename, app_filename):
     api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
 
     try:
-        response = requests.get(api_url, timeout=10) # Добавляем таймаут
-        response.raise_for_status() # Вызовет исключение для плохих статусов (4xx или 5xx)
+        response = requests.get(api_url, timeout=30)  # Добавляем таймаут
+        response.raise_for_status()  # Вызовет исключение для плохих статусов (4xx или 5xx)
         release_info = response.json()
 
         latest_tag = release_info.get("tag_name")
@@ -259,16 +320,17 @@ def get_latest_release_info(owner, repo, zip_filename, app_filename):
         # print(f"Неожиданная ошибка при получении информации о релизе: {e}")
         return None, None, None
 
+
 def download_file(url, destination_path):
     # Скачивает файл по URL в указанное место. Возвращает True при успехе, False при неудаче.
     try:
         # Скачиваем файл потоково, чтобы не держать весь файл в памяти
-        with requests.get(url, stream=True, timeout=60) as r: # Таймаут на скачивание
+        with requests.get(url, stream=True, timeout=60) as r:  # Таймаут на скачивание
             r.raise_for_status()
             total_size = int(r.headers.get('content-length', 0))
             downloaded_size = 0
             with open(destination_path, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192): # Читаем по 8KB
+                for chunk in r.iter_content(chunk_size=8192):  # Читаем по 8KB
                     f.write(chunk)
                     downloaded_size += len(chunk)
             return True
@@ -327,12 +389,14 @@ def extract_file_from_zip_to_same_dir(zip_file_path, files_to_extract):
         # print(f"Произошла непредвиденная ошибка при распаковке: {e}")
         return None
 
+
 def run_as_exe_app(APP_FILENAME):
     # проверим среду исполнения: если отладка (python.exe), то ложь, если автономное приложение, то истина
     current_app_path = sys.executable  # Путь к текущему исполняемому файлу (.exe)
-    return os.path.basename(current_app_path).lower()==APP_FILENAME.lower()
+    return os.path.basename(current_app_path).lower() == APP_FILENAME.lower()
 
-def get_file_size(url):
+
+def get_github_file_size(url):
     try:
         response = requests.head(url, allow_redirects=True)
         if response.status_code == 200:
@@ -347,16 +411,49 @@ def get_file_size(url):
         print(f"Ошибка: {e}")
         return None
 
+
+def get_github_file_date(url):
+    from email.utils import parsedate_to_datetime
+    # Получить дату файла по URL (без скачивания).
+    try:
+        response = requests.head(url, allow_redirects=True)
+        response.raise_for_status()
+        headers = response.headers
+        last_modified_str = headers.get('Last-Modified')
+        last_modified = None
+        if last_modified_str:
+            # Парсим RFC 7231 формат: "Wed, 21 Oct 2015 07:28:00 GMT"
+            last_modified = parsedate_to_datetime(last_modified_str)
+        return last_modified
+    except:
+        return None
+
+
+def compare_creation_times(file1_path, file2_path):
+    # Сравнить дату создания двух файлов.
+    # Возвращает: 1 если file1 новее, -1 если file2 новее, 0 если равны.
+    try:
+        time1, time2 = os.path.getctime(file1_path), os.path.getctime(file2_path)
+        if time1 > time2:
+            return 1
+        elif time1 < time2:
+            return -1
+        else:
+            return 0
+    except:
+        return 0
+
+
 def update_and_restart(download_zip_url, download_app_url=None):
     # если найдена новая версия, то скачиваем Zip. если версия текущая и найден Exe, то обновляем только его.
 
     # Скачивает новую версию, запускает скрипт обновления и завершает текущее приложение.
-    current_app_path = sys.executable # Путь к текущему исполняемому файлу (.exe)
+    current_app_path = sys.executable  # Путь к текущему исполняемому файлу (.exe)
 
     # сначала надо проверить среду исполнения: если отладка (python.exe), то стоп, если автономное приложение, то старт
     if not run_as_exe_app(APP_FILENAME):
         print("Обновление возможно только в автономном режиме")
-        return
+        # return False
 
     # Создаем временную папку для скачанного файла и скрипта обновления
     # Используем tempfile.TemporaryDirectory для автоматической очистки
@@ -371,35 +468,50 @@ def update_and_restart(download_zip_url, download_app_url=None):
                 # 1.1 Скачиваем новую версию - ZIP
                 downloaded_zip_path = os.path.join(tmpdir, ZIP_FILENAME)
                 if download_file(download_zip_url, downloaded_zip_path):
-                    extracted_files = extract_file_from_zip_to_same_dir(downloaded_zip_path, [APP_FILENAME, APP_UPDATER])
-                    if not extracted_files: return
-                    downloaded_app_path,downloaded_upd_path = extracted_files
-                    if not downloaded_app_path: return
+                    extracted_files = extract_file_from_zip_to_same_dir(downloaded_zip_path,
+                                                                        [APP_FILENAME, APP_UPDATER])
+                    if not extracted_files: return False
+                    downloaded_app_path, downloaded_upd_path = extracted_files
+                    if not downloaded_app_path: return False
                 else:
                     # print("Обновление отменено из-за ошибки скачивания.")
-                    return
+                    return False
             elif download_app_url:
                 start_after_update_flag = "yes"
                 # 1.2 Скачиваем апдейт - EXE
                 downloaded_app_path = os.path.join(tmpdir, APP_FILENAME)
                 downloaded_upd_path = ""
 
-                url_file_size = get_file_size(download_app_url)
-                file_size = os.path.getsize(current_app_path)
-                if url_file_size: # получилось получить размер заранее
-                    if url_file_size==file_size:
+                url_file_date = get_github_file_date(download_app_url)
+                file_date = os.path.getctime(current_app_path)
+                file_date = datetime.datetime.fromtimestamp(file_date, tz=datetime.timezone.utc)
+                if url_file_date:  # получилось получить дату заранее
+                    if url_file_date <= file_date:
                         # print("Обновление отменено из-за совпадения размера файлов.")
-                        return
+                        return False
+
+                url_file_size = get_github_file_size(download_app_url)
+                file_size = os.path.getsize(current_app_path)
+                if url_file_size:  # получилось получить размер заранее
+                    if url_file_size == file_size:
+                        # print("Обновление отменено из-за совпадения размера файлов.")
+                        return False
 
                 if not download_file(download_app_url, downloaded_app_path):
                     # print("Обновление отменено из-за ошибки скачивания.")
-                    return
+                    return False
 
                 if filecmp.cmp(current_app_path, downloaded_app_path, shallow=False):
                     # print("Обновление отменено из-за совпадения содержимого файлов.")
-                    return
+                    return False
 
-            else: return
+                if compare_creation_times(current_app_path, downloaded_app_path) >= 0:
+                    # print("Обновление отменено из-за того что скачан более старый файл. из-за ручного обновления")
+                    return False
+
+            else:
+                return False
+            print("Проверка обновления: Найден апдейт для вашей версии: " + VERSION)
             print("Обновление успешно скачано. Попробуем обновить приложение ...")
 
             # 2. Подготавливаем файлы для обновления
@@ -418,7 +530,7 @@ def update_and_restart(download_zip_url, download_app_url=None):
                 # Запускаем скрипт с помощью интерпретатора, который запустил текущее приложение
                 # Передаем пути к старому и новому файлам в качестве аргументов
                 subprocess.Popen([app_updater_path, current_app_path, downloaded_app_path_new, start_after_update_flag],
-                                 creationflags=0) # subprocess.DETACHED_PROCESS|subprocess.CREATE_NEW_PROCESS_GROUP Отключает процесс от родительского (окна консоли) на Windows
+                                 creationflags=0)  # subprocess.DETACHED_PROCESS|subprocess.CREATE_NEW_PROCESS_GROUP Отключает процесс от родительского (окна консоли) на Windows
                 print("Скрипт обновления запущен. Текущее приложение завершается.")
             except Exception as e:
                 print(f"Ошибка при запуске скрипта обновления: {e}")
@@ -435,44 +547,49 @@ def update_and_restart(download_zip_url, download_app_url=None):
         # print(f"Ошибка при работе с временной директорией: {e}")
         # print("Обновление не выполнено.")
 
+    return True
+
+
 def check_update():
     if not fl_update: return
 
     # удалим следы предыдущих обновлений
     if run_as_exe_app(APP_FILENAME):
         current_app_path = sys.executable  # Путь к текущему исполняемому файлу (.exe)
-        current_app_bak = current_app_path+".bak"
-        check_and_kill_process(APP_FILENAME+".bak")
+        current_app_bak = current_app_path + ".bak"
+        check_and_kill_process(APP_FILENAME + ".bak")
         if os.path.exists(current_app_bak): os.remove(current_app_bak)
 
     # Проверяет наличие новой версии и запускает процесс обновления при необходимости.
     for _ in range(5):
-        latest_tag, download_zip_url, download_app_url = get_latest_release_info(GITHUB_OWNER, GITHUB_REPO, ZIP_FILENAME, APP_FILENAME)
+        latest_tag, download_zip_url, download_app_url = get_latest_release_info(GITHUB_OWNER, GITHUB_REPO,
+                                                                                 ZIP_FILENAME, APP_FILENAME)
         if latest_tag and download_zip_url:
             break
-        time.sleep(3) # иногда сайт отвечает не с первого раза
+        time.sleep(3)  # иногда сайт отвечает не с первого раза
 
     if latest_tag and (download_zip_url or download_app_url):
         version_tag = latest_tag.replace(GITHUB_REPO.lower() + ".", "").lstrip('.').lstrip('v')
         try:
             # Сравниваем версии
             current_v = parse_version(VERSION)
-            latest_v = parse_version(version_tag) # Удаляем 'v' если есть в теге
+            latest_v = parse_version(version_tag)  # Удаляем 'v' если есть в теге
             if latest_v > current_v and download_zip_url:
-                print("Проверка обновления: Найдена новая версия "+version_tag+". Ваша версия: "+VERSION)
+                print("Проверка обновления: Найдена новая версия " + version_tag + ". Ваша версия: " + VERSION)
                 update_and_restart(download_zip_url)
                 # Важно: если update_and_restart успешно запустит скрипт и вызовет sys.exit(0), код ниже в этой функции выполняться не будет.
             elif latest_v == current_v and download_app_url:
-                print("Проверка обновления: Найден апдейт для вашей версии: "+VERSION)
-                update_and_restart("",download_app_url)
+                # print("Проверка обновления: Найден апдейт для вашей версии: " + VERSION)
+                update_and_restart("", download_app_url)
                 # Важно: если update_and_restart успешно запустит скрипт и вызовет sys.exit(0), код ниже в этой функции выполняться не будет.
             else:
                 pass
                 # print("Проверка обновления: ваша версия новее ...")
         except Exception as e:
-            print(f"Проверка обновления: ошибка при запуске обновления: {e}")
+            print(f"Проверка обновления: ошибка при запуске обновления: {e}.")
     else:
         print("Проверка обновления: не удалось проверить обновления.")
+
 
 def read_dir(path):
     file_list = []
@@ -491,10 +608,13 @@ def read_dir(path):
                 file_name = file_name.replace(time_stamp, "").strip()
                 file_name = os.path.splitext(file_name)[0].strip()
 
-                file_list_dict = dict(file_name=file, name=file_name, path=full_path, type=file_type, size=file_size, date_time=date_obj, date=time_stamp, check=False)
-                file_list.append(file_list_dict) # ([file, time_stamp, full_path, date_obj, file_name])
-    file_list.sort(key=lambda item: item['date_time'], reverse=True) # file_list.sort(key=lambda fl: fl[3], reverse=True)
+                file_list_dict = dict(file_name=file, name=file_name, path=full_path, type=file_type, size=file_size,
+                                      date_time=date_obj, date=time_stamp, check=False)
+                file_list.append(file_list_dict)  # ([file, time_stamp, full_path, date_obj, file_name])
+    file_list.sort(key=lambda item: item['date_time'],
+                   reverse=True)  # file_list.sort(key=lambda fl: fl[3], reverse=True)
     return file_list
+
 
 def print_error(msg):
     global message_info
@@ -505,6 +625,7 @@ def print_error(msg):
     print("\r", end="")
     print("\nОШИБКА: " + msg)
 
+
 def print_info(msg):
     global message_info
     message_info += msg + "\n"
@@ -514,14 +635,15 @@ def print_info(msg):
     print("\r", end="")
     print(msg)
 
+
 def test_read_write(backup_folder):
-    if backup_folder[-1]!="\\": backup_folder+="\\"
+    if backup_folder[-1] != "\\": backup_folder += "\\"
 
     # проверим существует ли папка с архивами
     if not os.path.isdir(backup_folder):
         print_error("Папка с архивами не найдена")
         return False
-    if backup_folder[0:2]=="\\\\":
+    if backup_folder[0:2] == "\\\\":
         print_info("<b>Сетевая папка с архивами найдена</b>: " + backup_folder)
     else:
         print_info("<b>Локальная папка с архивами найдена</b>: " + backup_folder)
@@ -557,14 +679,16 @@ def test_read_write(backup_folder):
     print_info(" + есть доступ по чтению и записи")
     return True
 
-def shift_date(current_date,review_period):
+
+def shift_date(current_date, review_period):
     old_date = current_date - datetime.timedelta(days=review_period)  # минус столько дней
     old_date = datetime.datetime.combine(old_date, datetime.time.min)  # сдвинем на начало дня
     return old_date
 
+
 def check_new_archives(file_list, review_period):
     current_date = datetime.datetime.now()  # текущая дата
-    old_date = shift_date(current_date,review_period)
+    old_date = shift_date(current_date, review_period)
 
     file_new = []
     for file_arc in file_list:
@@ -606,19 +730,19 @@ def check_disk_space(backup_folder, min_empty_space):
 
 def check_new_archives_rclone(remote_folder, review_period, depth_folder):
     current_date = datetime.datetime.now()  # текущая дата
-    old_date = shift_date(current_date,review_period)
+    old_date = shift_date(current_date, review_period)
 
     remote_file_list = rclone.ls(remote_folder, files_only=True, max_depth=depth_folder)
     remote_file_list = sorted(remote_file_list, key=lambda d: d['ModTime'], reverse=True)
 
     file_delete, skipped_files = [], ["time_marker.txt"]
-    for nn,file_arc in enumerate(remote_file_list):
+    for nn, file_arc in enumerate(remote_file_list):
         if file_arc["Name"].lower() in skipped_files:
-            file_delete.insert(0,nn)
+            file_delete.insert(0, nn)
     for nn in file_delete:
         remote_file_list.pop(nn)
 
-    file_new, max_file_date = [], datetime.datetime(1,1,1)
+    file_new, max_file_date = [], datetime.datetime(1, 1, 1)
     for file_arc in remote_file_list:
         mod_time = file_arc["ModTime"]
         if mod_time.find(".") >= 0:
@@ -628,24 +752,26 @@ def check_new_archives_rclone(remote_folder, review_period, depth_folder):
         file_date = time.strptime(mod_time, "%Y-%m-%dT%H:%M:%S")
         file_date = datetime.datetime(file_date.tm_year, file_date.tm_mon, file_date.tm_mday)
 
-        time_stamp = mod_time[8:10]+"."+mod_time[5:7]+"."+mod_time[:4]
+        time_stamp = mod_time[8:10] + "." + mod_time[5:7] + "." + mod_time[:4]
 
         file_name = file_arc["Name"]
         file_name = file_name.replace(time_stamp, "").strip()
         file_name = os.path.splitext(file_name)[0].strip()
 
-        file_name_dict = {"form":file_name, "date":time_stamp, "datetime":file_date, "in_period":(file_date >= old_date), "check":False}
+        file_name_dict = {"form": file_name, "date": time_stamp, "datetime": file_date,
+                          "in_period": (file_date >= old_date), "check": False}
         file_arc.update(file_name_dict)
 
-        max_file_date = max(max_file_date,file_date)
+        max_file_date = max(max_file_date, file_date)
         if file_date >= old_date:
             if len(file_new) < 3:
                 file_new.append(file_arc["Name"])
 
     days_dif = current_date - max_file_date
-    if review_period==1:
-        if len(file_new)==0:
-            print_error("В облаке за вчерашний день нет новых файлов. "+"Последний файл создан "+str(days_dif.days)+" дней назад")
+    if review_period == 1:
+        if len(file_new) == 0:
+            print_error("В облаке за вчерашний день нет новых файлов. " + "Последний файл создан " + str(
+                days_dif.days) + " дней назад")
     elif len(file_new) > 0:
         file_str = ""
         for nn, ff in enumerate(file_new):
@@ -653,16 +779,17 @@ def check_new_archives_rclone(remote_folder, review_period, depth_folder):
             if nn + 1 < len(file_new): file_str += ", "
         print_info(" + в облаке найдены свежие архивы: " + file_str)
     else:
-        print_error("В облаке за " + str(review_period) + " дней нет новых файлов. "+"Последний файл создан "+str(days_dif.days)+" дней назад")
+        print_error("В облаке за " + str(review_period) + " дней нет новых файлов. " + "Последний файл создан " + str(
+            days_dif.days) + " дней назад")
 
     return remote_file_list
 
 
 def check_skipped_archives_rclone(file_list, remote_file_list, review_period):
     current_date = datetime.datetime.now()  # текущая дата
-    old_date = shift_date(current_date,review_period)
+    old_date = shift_date(current_date, review_period)
 
-    remove_ext = False # есть архивы без расширения (яндекс)
+    remove_ext = False  # есть архивы без расширения (яндекс)
 
     for file_arc_remote in remote_file_list:
         mod_time = file_arc_remote["ModTime"]
@@ -692,7 +819,7 @@ def check_skipped_archives_rclone(file_list, remote_file_list, review_period):
 
         for file_arc_remote in remote_file_list:
             if file_arc["name"] == file_arc_remote["form"] and file_arc["date_time"] < file_arc_remote["datetime"]:
-                file_arc["check"] = file_arc_remote["check"] = True # в облаке есть более свежий файл
+                file_arc["check"] = file_arc_remote["check"] = True  # в облаке есть более свежий файл
                 break
 
     skipped_file_list = []
@@ -719,11 +846,12 @@ def check_skipped_archives_rclone(file_list, remote_file_list, review_period):
     # remove_ext - есть архивы без расширения (яндекс)
     return skipped_file_list, remove_ext
 
+
 def get_telegram_bot_users(telegram_bot, telegram_bot_token):
     # получить ИД чата
     url = f"https://api.telegram.org/bot{telegram_bot_token}/getUpdates"
     try:
-        data = requests.get(url).json()
+        data = requests.get(url, timeout=180).json()
     except:
         print("ОШИБКА: не могу подключиться к серверу Telegram")
         return []
@@ -749,6 +877,7 @@ def get_telegram_bot_users(telegram_bot, telegram_bot_token):
                 user_set.append([chat_user, chat_id])
     return user_set
 
+
 def send_message_to_telegram_bot(firma_name, telegram_bot, telegram_bot_token, telegram_bot_users, message):
     if telegram_bot == "" or telegram_bot_token == "":
         print("Не заданы настройки для Бота в Телеграм")
@@ -763,7 +892,9 @@ def send_message_to_telegram_bot(firma_name, telegram_bot, telegram_bot_token, t
         firma_msg = "Отчет о резеревном копировании\n"
     if message.find("ОШИБКА") >= 0:
         firma_msg = "<b>ОШИБКИ!</b> " + firma_msg
-    firma_msg += " <i>(версия сервиса уведомлений:"+VERSION+")</i>\n\n"
+    if message.find("ПРЕДУПРЕЖДЕНИЕ") >= 0:
+        firma_msg = "<b>ПРЕДУПРЕЖДЕНИЕ!</b> " + firma_msg
+    firma_msg += " <i>(версия сервиса уведомлений:" + VERSION + ")</i>\n\n"
     message = firma_msg + message
 
     print("")
@@ -772,17 +903,67 @@ def send_message_to_telegram_bot(firma_name, telegram_bot, telegram_bot_token, t
     for chat_user, chat_id in telegram_bot_users:
         url = f"https://api.telegram.org/bot{telegram_bot_token}/sendMessage?chat_id={chat_id}&text={message}&parse_mode=HTML"
         try:
-            data = requests.get(url).json()
+            data = requests.get(url, timeout=180).json()
             print(" + сообщение - " + chat_user + ": " + str(data['ok']))
         except:
             print("ОШИБКА: не могу подключиться к серверу Telegram")
     return
 
+
+def send_message_to_max_client(firma_name, max_client_instance, max_client_token, max_client_users, message):
+    if max_client_instance == "" or max_client_token == "":
+        print("Не заданы настройки для Клиента в Макс")
+        return
+    elif len(max_client_users) == 0:
+        print("Не настроен список пользователей Макс для рассылки")
+        return
+
+    if firma_name != "":
+        firma_msg = "Отчет о резеревном копировании в: <b>" + firma_name + "</b>\n"
+    else:
+        firma_msg = "Отчет о резеревном копировании\n"
+    if message.find("ОШИБКА") >= 0:
+        firma_msg = "<b>ОШИБКИ!</b> " + firma_msg
+    if message.find("ПРЕДУПРЕЖДЕНИЕ") >= 0:
+        firma_msg = "<b>ПРЕДУПРЕЖДЕНИЕ!</b> " + firma_msg
+    firma_msg += " <i>(версия сервиса уведомлений:" + VERSION + ")</i>\n\n"
+    message = firma_msg + message
+    message = remove_html_tags(message)
+
+    print("")
+    # отправить сообщение в чат
+    print("Отправляем сообщения в Макс")
+    greenAPI = API.GreenAPI(max_client_instance, max_client_token)
+    for chat_user, chat_id in max_client_users:
+        try:
+            response = greenAPI.sending.sendMessage(chat_id, message)
+            print(" + сообщение - " + chat_user + ": " + str(response.data))
+        except:
+            print("ОШИБКА: не могу подключиться к серверу Макс")
+    return
+
+
+def remove_html_tags(text):
+    # Удаляет HTML‑теги путём ручного разбора строки.
+    result = []
+    in_tag = False
+
+    for char in text:
+        if char == '<':
+            in_tag = True
+        elif char == '>':
+            in_tag = False
+        elif not in_tag:
+            result.append(char)
+
+    return ''.join(result)
+
+
 def user_list(telegram_bot, telegram_bot_token):
     # получить Имя чата
     url = f"https://api.telegram.org/bot{telegram_bot_token}/getMyName"
     try:
-        data = requests.get(url).json()
+        data = requests.get(url, timeout=180).json()
     except:
         print("ОШИБКА: не могу подключиться к серверу Telegram")
         return
@@ -795,6 +976,7 @@ def user_list(telegram_bot, telegram_bot_token):
         print("  Пользователь: " + chat_user + ", чат ид: " + chat_id)
     if len(user_set) == 0:
         print("  Пользователи не найдены")
+
 
 def check_cmd_param():
     param_str = "userlist,systray"
@@ -811,13 +993,14 @@ def check_cmd_param():
             return param
     return ""
 
+
 def get_telegram_command_messages(telegram_command, telegram_bot, telegram_bot_token, telegram_bot_users):
     user_messages = []
 
     # получить сообщения с запросами
     url = f"https://api.telegram.org/bot{telegram_bot_token}/getUpdates"
     try:
-        data = requests.get(url).json()
+        data = requests.get(url, timeout=180).json()
     except:
         print("ОШИБКА: не могу подключиться к серверу Telegram")
         return []
@@ -860,6 +1043,7 @@ def get_telegram_command_messages(telegram_command, telegram_bot, telegram_bot_t
             if not fl_msg:
                 user_messages.append([chat_user, chat_id, msg_text, msg_id, msg_date])
     return user_messages
+
 
 def check_menu_command(telegram_command, telegram_bot, telegram_bot_token, telegram_bot_users):
     app_folder = os.getenv('LOCALAPPDATA') + '\\ArchiveMonitoring'
@@ -914,36 +1098,37 @@ def check_menu_command(telegram_command, telegram_bot, telegram_bot_token, teleg
                     chat_user + "," + str(chat_id) + "," + msg_text + "," + str(msg_id) + "," + str(msg_date) + "\n")
     return tg_users
 
-def send_file(telegram_bot_token, telegram_bot_users):
-    def send_photo(chat_id, file_opened):
-        api_url = f"https://api.telegram.org/bot{telegram_bot_token}/"
-        method = "sendPhoto"
-        params = {'chat_id': chat_id}
-        files = {'photo': file_opened}
-        resp = requests.post(api_url + method, params, files=files)
 
-    def send_document(chat_id, file_opened):
-        api_url = f"https://api.telegram.org/bot{telegram_bot_token}/"
-        method = "sendDocument"
-        params = {'chat_id': chat_id}
-        files = {'document': file_opened}
-        resp = requests.post(api_url + method, params, files=files)
-
-    send_photo(telegram_bot_users[0][1], open("D:\\1.JPG", 'rb'))
-    send_document(telegram_bot_users[0][1], open("D:\\1.pdf", 'rb'))
-
-    return
+# def send_file(telegram_bot_token, telegram_bot_users):
+#     def send_photo(chat_id, file_opened):
+#         api_url = f"https://api.telegram.org/bot{telegram_bot_token}/"
+#         method = "sendPhoto"
+#         params = {'chat_id': chat_id}
+#         files = {'photo': file_opened}
+#         resp = requests.post(api_url + method, params, files=files)
+#
+#     def send_document(chat_id, file_opened):
+#         api_url = f"https://api.telegram.org/bot{telegram_bot_token}/"
+#         method = "sendDocument"
+#         params = {'chat_id': chat_id}
+#         files = {'document': file_opened}
+#         resp = requests.post(api_url + method, params, files=files)
+#
+#     send_photo(telegram_bot_users[0][1], open("D:\\1.JPG", 'rb'))
+#     send_document(telegram_bot_users[0][1], open("D:\\1.pdf", 'rb'))
+#
+#     return
 
 def show_user_info(telegram_bot, telegram_bot_token, telegram_bot_users):
     message = ""
     # получить пересланные сообщения
     url = f"https://api.telegram.org/bot{telegram_bot_token}/getUpdates"
-    data = requests.get(url).json()
+    data = requests.get(url, timeout=180).json()
     for chat_msg in data['result']:
         for message_id in ['message', 'edited_message']:
             if chat_msg.get(message_id) == None: continue
             if chat_msg[message_id].get('forward_date') == None or chat_msg[message_id].get(
-                'forward_origin') == None: continue
+                    'forward_origin') == None: continue
 
             chat_id = str(chat_msg[message_id]['from']['id'])
             fl_usr = False
@@ -976,12 +1161,15 @@ def show_user_info(telegram_bot, telegram_bot_token, telegram_bot_users):
         print("Отправляем сообщения в Телеграм")
         for chat_user, chat_id in telegram_bot_users:
             url = f"https://api.telegram.org/bot{telegram_bot_token}/sendMessage?chat_id={chat_id}&text={message}&parse_mode=HTML"
-            data = requests.get(url).json()
+            data = requests.get(url, timeout=180).json()
             print(" + сообщение - " + chat_user + ": " + str(data['ok']))
 
     return
 
-def run_cmd( base_command:str, command: str, args: List[str] = (), shell=True, encoding="utf-8") -> Tuple[int, str, str]:
+
+def run_cmd(base_command: str, command: str, args: List[str] = (), shell=True, encoding="utf-8") -> Tuple[
+    int, str, str]:
+    global process
     # add optional arguments and flags to the command
     args_str = utils.args2string(args)
     full_command = f"{base_command} {command} {args_str}"
@@ -1008,6 +1196,28 @@ def run_cmd( base_command:str, command: str, args: List[str] = (), shell=True, e
 
     return process.returncode, process.stdout, process.stderr, process.returncode
 
+
+def token_expiry(remote_name):
+    command = "config show " + remote_name
+    stdout, _ = utils.run_rclone_cmd(command)
+
+    process_out = stdout.split('\n')
+    for str_out in process_out:
+        if str_out.find("token = ") == 0:
+            token_str = str_out.replace("token = ", "")
+            try:
+                token_dict = json.loads(token_str)
+                expiry_str = token_dict['expiry']
+                expiry_str = expiry_str[:26] + expiry_str[27:]  # уберем 1 милисекунду
+                expiry_date = datetime.datetime.fromisoformat(expiry_str)
+                expiry_date = expiry_date.astimezone().replace(tzinfo=None)
+
+                return expiry_date
+            except:
+                return None
+    return None
+
+
 def type_remote(remote_name):
     command = "config show " + remote_name
     stdout, _ = utils.run_rclone_cmd(command)
@@ -1015,10 +1225,11 @@ def type_remote(remote_name):
     process_out = stdout.split('\n')
     for str_out in process_out:
         str_out = str_out.lower()
-        if str_out.find("type = ")==0:
-            str_out = str_out.replace("type = ","")
+        if str_out.find("type = ") == 0:
+            str_out = str_out.replace("type = ", "")
             return str_out
     return ""
+
 
 def test_rclone(remote_folder, min_empty_space):
     global rclone_config
@@ -1026,7 +1237,7 @@ def test_rclone(remote_folder, min_empty_space):
 
     if not rclone_config:
         rclone_config = os.path.join(os.path.expanduser("~"), ".config\\rclone\\rclone.conf")
-    utils.Config(config_path = rclone_config)
+    utils.Config(config_path=rclone_config)
 
     if not rclone.is_installed():
         print_error("Не установлен RClone.\n  Добавьте путь к программе в переменную окружения PATH")
@@ -1043,47 +1254,84 @@ def test_rclone(remote_folder, min_empty_space):
     if not remote_connection.endswith(":"): remote_connection = f"{remote_connection}:"
 
     remote_list = rclone.get_remotes()
-    if len(remote_list)==0:
+    if len(remote_list) == 0:
         print_error("Список конфигураций RClone пуст...")
         return False
-    remote_list = ', '.join(str(x).replace(':','') for x in remote_list)
+    remote_list = ', '.join(str(x).replace(':', '') for x in remote_list)
     print_info(" + Загружен список всех конфигураций RClone: (<i>" + remote_list + "</i>)")
 
     if not rclone.check_remote_existing(remote_connection):
         print_error("Не настроена в конфигурации RClone подключение к облаку: " + remote_connection)
         return False
-    typ = type_remote(remote_connection)
-    print_info(" + успешный выбор конфигурации подключения к облаку: " + remote_connection + " (тип - "+typ+")")
+    remote_type = type_remote(remote_connection)
+    print_info(
+        " + успешный выбор конфигурации подключения к облаку: " + remote_connection + " (тип - " + remote_type + ")")
+
+    remote_expiry = token_expiry(remote_connection)
+    # if remote_expiry:
+    #     current_date = datetime.datetime.now()
+    #     remote_expiry = shift_date(remote_expiry,-1)  # добавим один день. иногда токен обновляется и у него текущая дата
+    #     if remote_expiry < current_date:
+    #         remote_expiry = remote_expiry.strftime('%Y-%m-%d')
+    #         print_error(
+    #             "закончился срок действия пароля (" + remote_expiry + "), сохраненного в конфигурации RClone: " + remote_connection)
+    #         return False
 
     try:
         space_list = rclone.about(remote_connection)
-        empty_space = space_list.get("free")
-        total_space = space_list.get("total")
-        if empty_space == None or total_space == None:
-            print_error("Не могу проверить размер свободного места в облаке: " + remote_connection)
-            return False
     except:
-        print_error("Ошибка получения информации об облаке (возможно блокировка пользователя или окончание подписки): " + remote_connection)
+        print_error(
+            "Ошибка получения информации об облаке (возможно блокировка пользователя или закончилась подписка): " + remote_connection)
         return False
 
-    free_gb, total_gb = int(round(empty_space / gb, 0)),int(round(total_space / gb, 0))
-    percent = int(round(100*(total_gb-free_gb)/total_gb,0))
+    empty_space, used_space, total_space = space_list.get("free"), space_list.get("used"), space_list.get("total")
+    free_gb, total_gb = int(round(empty_space / gb, 0)), int(round(total_space / gb, 0))
+    percent = int(round(100 * (total_gb - free_gb) / total_gb, 0))
+
+    if empty_space == None or total_space == None:
+        print_error("Не могу проверить размер свободного места в облаке: " + remote_connection)
+        return False
+    if used_space > total_space:
+        print_info(
+            " + в облаке свободного места: " + str(free_gb) + " гб (занято " + str(percent) + "%), всего места: " + str(
+                total_gb) + " гб")
+        print_error(
+            "Загружено больше файлов чем свободного места (возможно закончилась подписка): " + remote_connection)
+        return False
+
     if free_gb < min_empty_space:
-        print_error("На диске в облаке мало свободного места: " + str(free_gb) + " гб (занято "+str(percent)+"%), всего места: " + str(total_gb) + " гб")
-    print_info(" + в облаке свободного места: " + str(free_gb) + " гб (занято "+str(percent)+"%), всего места: " + str(total_gb) + " гб")
+        print_error("На диске в облаке мало свободного места: " + str(free_gb) + " гб (занято " + str(
+            percent) + "%), всего места: " + str(total_gb) + " гб")
+    print_info(
+        " + в облаке свободного места: " + str(free_gb) + " гб (занято " + str(percent) + "%), всего места: " + str(
+            total_gb) + " гб")
 
     return True
 
+
+def check_file_exist(remote_folder, file_name):
+    last_slash = max(file_name.rfind('/'), file_name.rfind('\\'))
+    filename = file_name[last_slash + 1:] if last_slash != -1 else file_name
+
+    remote_file_list = rclone.ls(remote_folder, files_only=True, max_depth=1)
+    for nn, file_arc in enumerate(remote_file_list):
+        if file_arc["Name"].lower() == filename.lower():
+            return True
+    return False
+
+
 def send_skipped_files(skipped_file_list, backup_folder, remote_folder, review_period, remove_ext):
-    from rich.progress import (Progress, TextColumn, BarColumn, TaskProgressColumn, TransferSpeedColumn, TimeRemainingColumn,TimeElapsedColumn,SpinnerColumn)
-    pbar = Progress(TextColumn("[progress.description]{task.description}"),BarColumn(),TaskProgressColumn(), TimeElapsedColumn(),TimeRemainingColumn(), TransferSpeedColumn(), SpinnerColumn() )
+    from rich.progress import (Progress, TextColumn, BarColumn, TaskProgressColumn, TransferSpeedColumn,
+                               TimeRemainingColumn, TimeElapsedColumn, SpinnerColumn)
+    pbar = Progress(TextColumn("[progress.description]{task.description}"), BarColumn(), TaskProgressColumn(),
+                    TimeElapsedColumn(), TimeRemainingColumn(), TransferSpeedColumn(), SpinnerColumn())
     # https://rich.readthedocs.io/en/stable/progress.html#columns
     # maxage = "max-age "+str(review_period)+"d"
 
     print("")
     print("отправим в облако пропущенные файлы")
 
-    if remote_folder.lower().find("yandex")>=0:
+    if remote_folder.lower().find("yandex") >= 0:
         print("  работаем с облаком Yandex: скопируем файлы во временную папку и удалим расширения")
 
     backup_folder = backup_folder[:-1] if backup_folder[-1] == "\\" else backup_folder  # уберем слэш в конце
@@ -1106,58 +1354,78 @@ def send_skipped_files(skipped_file_list, backup_folder, remote_folder, review_p
             shutil.copyfile(src_file, dst_file)
             file_path["path"] = dst_file
         except:
-            print(" ... не получается скопировать файл. ошибка диска: "+dst_file)
+            print(" ... не получается скопировать файл. ошибка диска: " + dst_file)
             file_path["path"] = ""
 
+    fl_error = False
     file_str = message_file = ""
     for nn, file_path in enumerate(skipped_file_list):
         src_file = file_path["path"]
         if src_file:
-            rclone.copy(src_file, remote_folder, ignore_existing=False, show_progress=True, pbar=pbar) # , args=['--' + maxage]
+            try:
+                if check_file_exist(remote_folder, file_path["file_name"]): continue
+
+                rclone.copy(src_file, remote_folder, ignore_existing=False, show_progress=True,
+                            pbar=pbar)  # , args=['--' + maxage]
+            except:
+                fl_error = True
+                file_str = file_path["file_name"]
+                break
 
             file_str += file_path["file_name"]
             if nn + 1 < len(file_path): file_str += ", "
     # rclone.copy(tmp_folder, remote_folder, ignore_existing=False, args=['--' + maxage], show_progress=True, pbar=pbar) # , args=['--' + maxage], show_progress=True
     shutil.rmtree(tmp_folder)
 
-    if file_str:
-        message_file = "Загрузили в облако пропущенные файлы: "+file_str
+    if file_str and not fl_error:
+        message_file = "ПРЕДУПРЕЖДЕНИЕ: Загрузили в облако пропущенные файлы: " + file_str
+    elif fl_error:
+        message_file = "ОШИБКА: Не получилось записать в облако пропущенный файл: " + file_str + ". возможно оно не доступно для загрузки файлов. проверьте вашу подписку и лимит загрузки."
+
     return message_file
 
-def create_time_marker_rclone(remote_folder):
-    # Получаем временную директорию Windows
-    try:
-        temp_dir = tempfile.gettempdir()
-        file_path = os.path.join(temp_dir, "time_marker.txt")
-        # Получаем текущую дату в формате ГГГГ-ММ-ДД
-        current_date = "monitoring: "+datetime.datetime.now().strftime("%Y-%m-%d")
-        # Создаем и записываем файл
-        with open(file_path, 'w', encoding='utf-8') as file:
-            file.write(current_date)
-        rclone.copy(file_path, remote_folder, ignore_existing=True, show_progress=False)
-        os.remove(file_path)
-        print_info(" + записали в облако временную метку проверки файлов")
-    except:
-        print_error("не получилось записать в облако временную метку проверки файлов. возможно оно не доступно для загрузки файлов")
 
-def test_net_server(net_server, net_folder, net_folder_user,net_folder_pass, min_empty_space, review_period):
-    if net_server=="" or net_folder=="": return False
+def create_time_marker_rclone(remote_folder):
+    temp_dir = tempfile.gettempdir()
+    file_path = os.path.join(temp_dir, "time_marker.txt")
+    remote_path = os.path.join(remote_folder, "time_marker.txt")
+    # Получаем текущую дату в формате ГГГГ-ММ-ДД
+    current_date = "monitoring: " + datetime.datetime.now().strftime("%Y-%m-%d")
+    # Создаем и записываем файл
+    with open(file_path, 'w', encoding='utf-8') as file:
+        file.write(current_date)
+
+    try:
+        if check_file_exist(remote_folder, "time_marker.txt"):
+            rclone.delete(remote_path)
+        rclone.copy(file_path, remote_folder, ignore_existing=True, show_progress=False)
+        print_info(" + облако доступно для загрузки. создали временную метку проверки файлов")
+    except:
+        print_error("не получилось записать в облако временную метку проверки файлов.")
+        print_error("облако не доступно для загрузки файлов. проверьте вашу подписку и лимит загрузки.")
+    os.remove(file_path)
+
+
+def test_net_server(net_server, net_folder, net_folder_user, net_folder_pass, min_empty_space, review_period):
+    if net_server == "" or net_folder == "": return False
 
     # пропингуем сервер
     # response = os.system(f"ping -n 1 {net_server}")
     ping_res = ping(net_server, timeout=15)
-    if typeof(ping_res)=="bool":
+    if typeof(ping_res) == "bool":
         if ping_res == False:
-            print_error("Сетевое хранилище недоступно: "+net_server+"\n  Проверьте подключение к сети ("+str(ping_res)+")")
+            print_error("Сетевое хранилище недоступно: " + net_server + "\n  Проверьте подключение к сети (" + str(
+                ping_res) + ")")
             return False
     elif not is_number(ping_res):
         if ping_res == False or ping_res == None:
-            print_error("Сетевое хранилище недоступно: "+net_server+"\n  Проверьте подключение к сети ("+str(ping_res)+")")
+            print_error("Сетевое хранилище недоступно: " + net_server + "\n  Проверьте подключение к сети (" + str(
+                ping_res) + ")")
             return False
-    print_info("\n<b>Найдено сетевое хранилище: </b>"+net_server)
+    print_info("\n<b>Найдено сетевое хранилище: </b>" + net_server)
 
     # Подключимся к сетевому рессурсу
-    mount_command = "net use "+net_folder+" /user:"+net_folder_user+" "+net_folder_pass+">nul"
+    mount_command = "net use " + net_folder + " /user:" + net_folder_user + " " + net_folder_pass + ">nul"
     os.system(mount_command)
 
     # проверим существует ли папка с архивами, есть ли доступ по чтению и записи
@@ -1171,10 +1439,11 @@ def test_net_server(net_server, net_folder, net_folder_user,net_folder_pass, min
     check_new_archives(file_list, review_period)
 
     # Отключимся от сетевого рессурса
-    unmount_command = "net use * /del /y"+">nul"
+    unmount_command = "net use * /del /y" + ">nul"
     os.system(unmount_command)
 
     return True
+
 
 def show_about(icon_item, item):
     """Показывает информацию о программе"""
@@ -1187,7 +1456,7 @@ def show_about(icon_item, item):
         temp_root.withdraw()
 
         # Показываем сообщение
-        messagebox.showinfo("О программе",f"Монитор архивов 1С\n\nОтслеживает команды в Телеграм боте" )
+        messagebox.showinfo("О программе", f"Монитор архивов 1С\n\nОтслеживает команды в Телеграм боте")
 
         # Закрываем временное окно
         temp_root.destroy()
@@ -1196,16 +1465,19 @@ def show_about(icon_item, item):
     about_thread = threading.Thread(target=show_and_destroy)
     about_thread.start()
 
+
 def exit_application(icon_item, item):
     """Завершает работу программы"""
     global app_running, tray_icon
     app_running = False
     tray_icon.stop()
 
+
 def send_report(icon_item, item):
     """Отправляем отчет"""
     global telegram_bot_users_work
-    send_to_telegram(telegram_bot_users_work)
+    send_to_mesendger(telegram_bot_users_work, [])
+
 
 def setup_tray_icon():
     """Настраивает иконку в трее"""
@@ -1239,15 +1511,17 @@ def setup_tray_icon():
     # Запускаем иконку
     tray_icon.run()
 
+
 def check_time(time_start):
     global new_day
     """
     Проверяет текущее время и сравнивает его с заданным временем time_start "18:30".
     """
-    current_time = datetime.datetime.now().strftime("%H:%M") # Получаем текущее время в формате "ЧЧ:ММ"
-    if current_time == "00:00" : new_day = True
+    current_time = datetime.datetime.now().strftime("%H:%M")  # Получаем текущее время в формате "ЧЧ:ММ"
+    if current_time == "00:00": new_day = True
 
     return current_time == time_start
+
 
 def bot_monitor():
     """Функция мониторинга сообщений в Боте"""
@@ -1261,14 +1535,15 @@ def bot_monitor():
         # show_user_info(telegram_bot, telegram_bot_token, telegram_bot_users)  # пасхалка
         telegram_bot_users = check_menu_command("/status", telegram_bot, telegram_bot_token, telegram_bot_users_work)
         if len(telegram_bot_users) != 0:
-            send_to_telegram(telegram_bot_users)
+            send_to_mesendger(telegram_bot_users, [])
         if check_time(time_start):
             if new_day:
-                send_to_telegram(telegram_bot_users_work)
+                send_to_mesendger(telegram_bot_users_work, [])
                 new_day = False
 
         # Ждем перед следующей проверкой
         time.sleep(CHECK_INTERVAL)
+
 
 def run_cmd(base_command: str, command: str, shell=True, encoding="oem") -> Tuple[str, str, int]:
     full_command = f"{base_command} {command}"
@@ -1289,10 +1564,12 @@ def run_cmd(base_command: str, command: str, shell=True, encoding="oem") -> Tupl
     except:
         return "", "", -1
 
+
 def test_archive_on_error(archive_path):
     # Проверить целостность архива
     try:
-        command = 't "'+archive_path+'"'
+        pasw = '-p123' if archive_path.count("пас-123") else '-p'
+        command = 't ' + pasw + ' "' + archive_path + '"'
         stdout, _, returncode = run_cmd(archivator_app, command)
         # if returncode != 0: return False
 
@@ -1304,8 +1581,8 @@ def test_archive_on_error(archive_path):
 
             if str_out == "multivolume = +":
                 fl_multivolume = True
-            if fl_multivolume and str_out.find("volume index = ")==0:
-                if str_out != "volume index = 0": # пропустим файлы многотомного архива, кроме первого
+            if fl_multivolume and str_out.find("volume index = ") == 0:
+                if str_out != "volume index = 0":  # пропустим файлы многотомного архива, кроме первого
                     fl_ok = True
                     break
 
@@ -1319,18 +1596,20 @@ def test_archive_on_error(archive_path):
                 fl_ok = True
                 break
 
-            if str_out == "break signaled": # ctrl+c во время тестирования архива. пропустим
+            if str_out == "break signaled":  # ctrl+c во время тестирования архива. пропустим
                 fl_ok = True
                 break
         return fl_ok
     except:
         return False
 
+
 def list_files_from_archive(archive_path):
     file_in_archive = []
     # Проверить целостность архива
     try:
-        command = 'l "'+archive_path+'"'
+        pasw = '-p123' if archive_path.count("пас-123") else '-p'
+        command = 'l ' + pasw + ' "' + archive_path + '"'
         stdout, _, returncode = run_cmd(archivator_app, command)
         if returncode != 0: return []
 
@@ -1339,11 +1618,11 @@ def list_files_from_archive(archive_path):
         for str_out in process_out:
             str_out = str_out.lower()
             if not fl_start:
-                if str_out.find("--------------")==0:
+                if str_out.find("--------------") == 0:
                     fl_start = True
                 continue
             else:
-                if str_out.find("--------------")==0:
+                if str_out.find("--------------") == 0:
                     break
                 file_name = str_out[53:]
                 file_name = pathlib.Path(file_name).name
@@ -1352,16 +1631,17 @@ def list_files_from_archive(archive_path):
     except:
         return []
 
+
 def check_archives_param(file_list, review_period=1):
     current_date = datetime.datetime.now()  # текущая дата
-    old_date = shift_date(current_date,review_period)
+    old_date = shift_date(current_date, review_period)
 
     # проверим архивы по списку: на мин.размер файла и тест архива на распаковку
     fl_error = False
     for nn, file_arc in enumerate(file_list):
         if file_arc["date_time"] < old_date: continue
 
-        print("\r"+"тестируем архив: "+file_arc["path"],end="")
+        print("\r" + "тестируем архив: " + file_arc["path"] + "     ", end="")
         if file_arc["size"] < min_file_size:
             fl_error = True
             print_error("Найден очень маленький файл, возможно поврежденный архив: " + file_arc["file_name"])
@@ -1379,6 +1659,7 @@ def check_archives_param(file_list, review_period=1):
 
     if not fl_error:
         print_info(" + все архивы проверены, ошибок не обнаружено")
+
 
 def test_file_archives(backup_folder, min_empty_space, review_period):
     file_list = []
@@ -1398,8 +1679,9 @@ def test_file_archives(backup_folder, min_empty_space, review_period):
 
     return file_list
 
-def send_to_telegram(telegram_bot_users_work = [], copy_file = False):
-    global firma_name, backup_folder, remote_folder, net_server, net_folder, net_folder_user, net_folder_pass, min_empty_space, review_period, depth_folder, telegram_bot, telegram_bot_token, time_start
+
+def send_to_mesendger(telegram_bot_users_work=[], max_client_users_work=[], copy_file=False):
+    global firma_name, backup_folder, remote_folder, net_server, net_folder, net_folder_user, net_folder_pass, min_empty_space, review_period, depth_folder, telegram_bot, telegram_bot_token, max_client_instance, max_client_token, max_client_users, time_start
 
     print("\nЗапуск анализатора...\n")
     #########################################################################################
@@ -1414,7 +1696,7 @@ def send_to_telegram(telegram_bot_users_work = [], copy_file = False):
 
     # проверим доступен ли сервер по сети, есть ли доступ по записи и есть ли свободное место в папке
     # проверим список архивов, создаются ли новые архивы за указанный контрольный период
-    test_net_server(net_server, net_folder, net_folder_user,net_folder_pass, min_empty_space, review_period)
+    test_net_server(net_server, net_folder, net_folder_user, net_folder_pass, min_empty_space, review_period)
 
     #########################################################################################
     # работаем с RClone
@@ -1435,24 +1717,29 @@ def send_to_telegram(telegram_bot_users_work = [], copy_file = False):
         skipped_file_list, remove_ext = check_skipped_archives_rclone(file_list, remote_list, review_period)
 
     #########################################################################################
-    # работаем с Telegram
+    # работаем с Месенджерами
 
     # отправим сообщение боту в Телеграм
     send_message_to_telegram_bot(firma_name, telegram_bot, telegram_bot_token, telegram_bot_users_work, message_info)
+    # отправим сообщение боту в Телеграм
+    send_message_to_max_client(firma_name, max_client_instance, max_client_token, max_client_users_work, message_info)
 
-    if copy_file and len(skipped_file_list)>0:
+    if copy_file and len(skipped_file_list) > 0:
         # сначала надо проверить среду исполнения: если отладка (python.exe), то пропускаем, если автономное приложение, то старт
         if run_as_exe_app(APP_FILENAME):
             # отправим в облако пропущенные файлы
-            message_files = send_skipped_files(skipped_file_list, backup_folder, remote_folder, review_period, remove_ext)
+            message_files = send_skipped_files(skipped_file_list, backup_folder, remote_folder, review_period,
+                                               remove_ext)
             if message_files:
-                send_message_to_telegram_bot(firma_name, telegram_bot, telegram_bot_token, telegram_bot_users_work, message_files)
+                send_message_to_telegram_bot(firma_name, telegram_bot, telegram_bot_token, telegram_bot_users_work,
+                                             message_files)
 
     return
 
+
 def main():
     global message_info
-    global firma_name, backup_folder, remote_folder, net_server, net_folder, net_folder_user, net_folder_pass, min_empty_space, review_period, depth_folder, telegram_bot, telegram_bot_token, telegram_bot_users, time_start
+    global firma_name, backup_folder, remote_folder, net_server, net_folder, net_folder_user, net_folder_pass, min_empty_space, review_period, depth_folder, telegram_bot, telegram_bot_token, telegram_bot_users, max_client_instance, max_client_token, max_client_users, time_start
     close_spalsh_screen()
 
     read_config()
@@ -1466,6 +1753,7 @@ def main():
         make_icon()
         setup_tray_icon()
     else:
-        send_to_telegram(telegram_bot_users, True)
+        send_to_mesendger(telegram_bot_users, max_client_users, True)
+
 
 main()
