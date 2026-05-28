@@ -6,6 +6,7 @@ from packaging.version import parse as parse_version  # Для надежног�
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from rclone_python import rclone, utils
 from max_api_client_python import API
+from requests.exceptions import ProxyError, ConnectionError
 
 VERSION = __version__ = "1.5.5"
 GITHUB_OWNER, GITHUB_REPO = "grigorusha", "ArchiveMonitoring"
@@ -24,11 +25,22 @@ CHECK_INTERVAL = 10  # Интервал проверки в секундах
 
 firma_name, backup_folder, rclone_config, remote_folder = "", "", "", ""
 telegram_bot, telegram_bot_token, telegram_bot_users, telegram_bot_users_work = "", "", [], []
-max_client_instance, max_client_token, max_client_users = "", "", ""
+max_client_instance, max_client_token, max_client_users = "", "", []
 
 min_empty_space, review_period, depth_folder, time_start = 10, 5, 3, ""
 net_server, net_folder, net_folder_user, net_folder_pass = "", "", "", ""
 
+socks_proxy, proxies = "", {}
+
+def init_proxies():
+    global proxies
+    if socks_proxy:
+        proxies = {
+            "http": socks_proxy,
+            "https": socks_proxy
+        }
+    else:
+        proxies = {}
 
 # Регистрируем обработчик сигнала (ctrl+C)
 def signal_handler(sig, frame):
@@ -177,15 +189,15 @@ def create_icon_ini(color):
 
 
 def read_config():
-    global firma_name, backup_folder, rclone_config, remote_folder, net_server, net_folder, net_folder_user, net_folder_pass, min_empty_space, review_period, depth_folder, telegram_bot, telegram_bot_token, telegram_bot_users, max_client_instance, max_client_token, max_client_users, time_start, fl_update
+    global firma_name, backup_folder, rclone_config, remote_folder, net_server, net_folder, net_folder_user, net_folder_pass, min_empty_space, review_period, depth_folder, telegram_bot, telegram_bot_token, telegram_bot_users, max_client_instance, max_client_token, max_client_users, time_start, fl_update, socks_proxy
 
     firma_name, backup_folder, rclone_config, remote_folder = "", "", "", ""
     telegram_bot, telegram_bot_token, telegram_bot_users = "", "", []
-    max_client_instance, max_client_token, max_client_users = "", "", ""
+    max_client_instance, max_client_token, max_client_users = "", "", []
 
     min_empty_space, review_period, depth_folder, time_start = 10, 5, 3, ""
     net_server, net_folder, net_folder_user, net_folder_pass = "", "", "", ""
-    fl_update = True
+    socks_proxy, fl_update = "", True
 
     dir = os.path.dirname(os.path.abspath(sys.executable)) if run_as_exe_app(APP_FILENAME) else os.path.dirname(
         __file__)
@@ -266,6 +278,10 @@ def read_config():
                 user_list = b_user.split(",")
                 if len(user_list) < 2: continue
                 max_client_users.append([user_list[0], user_list[1]])
+
+        elif command == "SocksProxy".lower():
+            socks_proxy = params.replace('"', '')
+            init_proxies()
 
         elif command == "MinEmptySpaceInGB".lower():
             min_empty_space = int(params)
@@ -835,13 +851,12 @@ def check_skipped_archives_rclone(file_list, remote_file_list, review_period):
             skipped_file_list.append(file_arc)
 
         if file_str != "":
-            print_error("В облаке за " + str(review_period) + " дней не загруженно " + str(
-                count) + " архивов. Список пропущенных архивов: " + file_str)
+            print_error("В облаке за " + str(review_period) + " дней не загруженно " + str(count) + " архивов. Список пропущенных архивов: " + file_str)
         else:
             print_info(" + В облаке за " + str(review_period) + " дней загружены все архивы")
     else:
+        print_error("В облаке за " + str(review_period) + " дней нет загруженых архивов")
         pass
-        # print_info(" + В облаке за " + str(review_period) + " нет загруженых архивов")
 
     # remove_ext - есть архивы без расширения (яндекс)
     return skipped_file_list, remove_ext
@@ -851,7 +866,7 @@ def get_telegram_bot_users(telegram_bot, telegram_bot_token):
     # получить ИД чата
     url = f"https://api.telegram.org/bot{telegram_bot_token}/getUpdates"
     try:
-        data = requests.get(url, timeout=180).json()
+        data = requests.get(url, timeout=180, proxies=proxies).json()
     except:
         print("ОШИБКА: не могу подключиться к серверу Telegram")
         return []
@@ -903,8 +918,12 @@ def send_message_to_telegram_bot(firma_name, telegram_bot, telegram_bot_token, t
     for chat_user, chat_id in telegram_bot_users:
         url = f"https://api.telegram.org/bot{telegram_bot_token}/sendMessage?chat_id={chat_id}&text={message}&parse_mode=HTML"
         try:
-            data = requests.get(url, timeout=180).json()
+            data = requests.get(url, timeout=180, proxies=proxies).json()
             print(" + сообщение - " + chat_user + ": " + str(data['ok']))
+        except ProxyError:
+            print("ОШИБКА: Ошибка подключения к прокси")
+        except ConnectionError:
+            print("ОШИБКА: не могу подключиться к серверу Telegram")
         except:
             print("ОШИБКА: не могу подключиться к серверу Telegram")
     return
@@ -942,19 +961,33 @@ def send_message_to_max_client(firma_name, max_client_instance, max_client_token
             print("ОШИБКА: не могу подключиться к серверу Макс")
     return
 
-
 def remove_html_tags(text):
     # Удаляет HTML‑теги путём ручного разбора строки.
     result = []
     in_tag = False
+    i = 0
+    length = len(text)
 
-    for char in text:
-        if char == '<':
+    while i < length:
+        if text[i] == '<':
             in_tag = True
-        elif char == '>':
+        elif text[i] == '>':
             in_tag = False
         elif not in_tag:
-            result.append(char)
+            # Обработка HTML-сущностей
+            if text[i] == '&' and i + 1 < length:
+                # Поиск закрывающей точки с запятой
+                j = i + 1
+                while j < length and text[j] != ';' and j - i < 10:
+                    j += 1
+                if j < length and text[j] == ';':
+                    # Пропускаем сущность
+                    i = j
+                else:
+                    result.append(text[i])
+            else:
+                result.append(text[i])
+        i += 1
 
     return ''.join(result)
 
@@ -963,7 +996,7 @@ def user_list(telegram_bot, telegram_bot_token):
     # получить Имя чата
     url = f"https://api.telegram.org/bot{telegram_bot_token}/getMyName"
     try:
-        data = requests.get(url, timeout=180).json()
+        data = requests.get(url, timeout=180, proxies=proxies).json()
     except:
         print("ОШИБКА: не могу подключиться к серверу Telegram")
         return
@@ -1000,7 +1033,7 @@ def get_telegram_command_messages(telegram_command, telegram_bot, telegram_bot_t
     # получить сообщения с запросами
     url = f"https://api.telegram.org/bot{telegram_bot_token}/getUpdates"
     try:
-        data = requests.get(url, timeout=180).json()
+        data = requests.get(url, timeout=180, proxies=proxies).json()
     except:
         print("ОШИБКА: не могу подключиться к серверу Telegram")
         return []
@@ -1123,7 +1156,7 @@ def show_user_info(telegram_bot, telegram_bot_token, telegram_bot_users):
     message = ""
     # получить пересланные сообщения
     url = f"https://api.telegram.org/bot{telegram_bot_token}/getUpdates"
-    data = requests.get(url, timeout=180).json()
+    data = requests.get(url, timeout=180, proxies=proxies).json()
     for chat_msg in data['result']:
         for message_id in ['message', 'edited_message']:
             if chat_msg.get(message_id) == None: continue
@@ -1161,7 +1194,7 @@ def show_user_info(telegram_bot, telegram_bot_token, telegram_bot_users):
         print("Отправляем сообщения в Телеграм")
         for chat_user, chat_id in telegram_bot_users:
             url = f"https://api.telegram.org/bot{telegram_bot_token}/sendMessage?chat_id={chat_id}&text={message}&parse_mode=HTML"
-            data = requests.get(url, timeout=180).json()
+            data = requests.get(url, timeout=180, proxies=proxies).json()
             print(" + сообщение - " + chat_user + ": " + str(data['ok']))
 
     return
@@ -1476,7 +1509,7 @@ def exit_application(icon_item, item):
 def send_report(icon_item, item):
     """Отправляем отчет"""
     global telegram_bot_users_work
-    send_to_mesendger(telegram_bot_users_work, [])
+    send_to_messendger(telegram_bot_users_work, [])
 
 
 def setup_tray_icon():
@@ -1535,10 +1568,10 @@ def bot_monitor():
         # show_user_info(telegram_bot, telegram_bot_token, telegram_bot_users)  # пасхалка
         telegram_bot_users = check_menu_command("/status", telegram_bot, telegram_bot_token, telegram_bot_users_work)
         if len(telegram_bot_users) != 0:
-            send_to_mesendger(telegram_bot_users, [])
+            send_to_messendger(telegram_bot_users, [])
         if check_time(time_start):
             if new_day:
-                send_to_mesendger(telegram_bot_users_work, [])
+                send_to_messendger(telegram_bot_users_work, [])
                 new_day = False
 
         # Ждем перед следующей проверкой
@@ -1680,7 +1713,7 @@ def test_file_archives(backup_folder, min_empty_space, review_period):
     return file_list
 
 
-def send_to_mesendger(telegram_bot_users_work=[], max_client_users_work=[], copy_file=False):
+def send_to_messendger(telegram_bot_users_work=[], max_client_users_work=[], copy_file=False):
     global firma_name, backup_folder, remote_folder, net_server, net_folder, net_folder_user, net_folder_pass, min_empty_space, review_period, depth_folder, telegram_bot, telegram_bot_token, max_client_instance, max_client_token, max_client_users, time_start
 
     print("\nЗапуск анализатора...\n")
@@ -1717,11 +1750,11 @@ def send_to_mesendger(telegram_bot_users_work=[], max_client_users_work=[], copy
         skipped_file_list, remove_ext = check_skipped_archives_rclone(file_list, remote_list, review_period)
 
     #########################################################################################
-    # работаем с Месенджерами
+    # работаем с Мессенджерами
 
     # отправим сообщение боту в Телеграм
     send_message_to_telegram_bot(firma_name, telegram_bot, telegram_bot_token, telegram_bot_users_work, message_info)
-    # отправим сообщение боту в Телеграм
+    # отправим сообщение клиенту в Макс
     send_message_to_max_client(firma_name, max_client_instance, max_client_token, max_client_users_work, message_info)
 
     if copy_file and len(skipped_file_list) > 0:
@@ -1753,7 +1786,7 @@ def main():
         make_icon()
         setup_tray_icon()
     else:
-        send_to_mesendger(telegram_bot_users, max_client_users, True)
+        send_to_messendger(telegram_bot_users, max_client_users, True)
 
 
 main()
